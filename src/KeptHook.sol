@@ -41,8 +41,10 @@ contract KeptHook is IUnlockCallback {
     address public immutable vault;
     /// @notice The IMD launch factory: the only account allowed to initialize the pool.
     address public immutable factory;
-    /// @notice When trading opened: the first swap that moved IMD. Zero until then, so the opening
-    /// window cannot elapse before the pool holds liquidity anyone can trade against.
+    /// @notice When trading opened: the first swap that moved IMD through the pool. Zero until then,
+    /// so the opening window cannot elapse before the pool holds liquidity anyone can trade against;
+    /// a swap the pool filled nothing of (an empty pool, or 1 wei whose whole amount is fee) is
+    /// charged but does not open it.
     uint256 public openedAt;
     uint256 public collected;
     bool public initialized;
@@ -145,7 +147,9 @@ contract KeptHook is IUnlockCallback {
         } else {
             fee = _feeOf(fill, rate, BPS);
         }
-        _accrue(fee);
+        // A request so small that the fee is all of it (1 wei exact-in) fills nothing: the fee is
+        // still owed, but a swap that moves no IMD through the pool does not open the window.
+        _accrue(fee, fill != 0);
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(int128(int256(fee)), 0), 0);
     }
 
@@ -164,13 +168,15 @@ contract KeptHook is IUnlockCallback {
         uint256 rate = feeNow();
         uint256 fee =
             amount < 0 ? _feeOf(uint256(-amount), rate, BPS - rate) : _feeOf(uint256(amount), rate, BPS);
-        _accrue(fee);
+        _accrue(fee, amount != 0);
         return (IHooks.afterSwap.selector, int128(int256(fee)));
     }
 
-    function _accrue(uint256 fee) private {
+    /// @dev Books `fee` as an IMD claim. Only a swap that moved IMD through the pool (`moved`) opens
+    /// the window: a charged swap the pool filled nothing of, as on an empty pool, never does.
+    function _accrue(uint256 fee, bool moved) private {
         if (fee == 0) return;
-        if (openedAt == 0) {
+        if (moved && openedAt == 0) {
             openedAt = block.timestamp;
             emit Opened(block.timestamp);
         }

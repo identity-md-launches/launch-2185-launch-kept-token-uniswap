@@ -85,20 +85,78 @@ Not a defect; nothing to change. Its observations (constructor order, permission
 factory-only initialization, claim accounting, sweep guards, no admin surface) are now also
 asserted by `test/KeptHookLaunch.t.sol` and `test_constructorArgumentsInLaunchOrder`.
 
+## Revision: reviewer findings after acceptance
+
+### 277d240eb0ff344c490742d86f3da093d8663a6af1b94d195bfcac4955532918 — 1-wei empty-pool swap opens the window (medium)
+
+Reproduced with the reviewer's proof: on a pool the factory had initialized but not seeded, an
+exact-input swap of 1 wei of IMD left `openedAt` at the swap's timestamp. The cause is the
+exact-input shortcut in `beforeSwap`: the ceiling fee on 1 wei is the whole wei at every rate, so
+the hook's quote to the pool is zero, `SpecifiedAmount.filled` returns zero, the "full fill"
+comparison `fill == budget - reserve` holds as `0 == 0`, the wei is charged, and `_accrue` opened
+the window although the PoolManager swapped nothing (`Pool.swap` returns early on a zero amount).
+Two-wei and larger swaps were not affected. Had the factory seeded liquidity in a later
+transaction, anyone could have burned the 30-minute window down with 1 wei of IMD.
+
+Changed `src/KeptHook.sol`: `_accrue` takes a second argument, whether the swap moved IMD through
+the pool (`fill != 0` in `beforeSwap`, a nonzero pool IMD delta in `afterSwap`), and sets `openedAt`
+only then. The fee itself is unchanged: 1 wei is still charged, as the accepted dust test asserts
+for a seeded pool, because the fee rounds up and one wei cannot be split; it simply never opens
+the window. No ABI, event, constructor or permission change.
+
+Tests: `KeptHookOpeningTest` and its token-first variant (`test/KeptHook.t.sol`) replay the
+reviewer's scenario (1 wei on the empty pool is charged, `openedAt` stays 0, a seed thirty minutes
+later and a 1,000 IMD buy still pay 200 IMD and open the window then) and the seeded-pool case
+(1 wei charged without opening, 2 wei opens). `HookFixture._checkedSwap` now asserts on every
+checked swap, in both currency orders and all fuzz runs, that `openedAt` moves exactly when the
+manager's `Swap` event carries a nonzero IMD amount. The fork rehearsal sends the 1-wei swap on
+the live PoolManager before seeding. The reviewer's proof passes.
+
+### fc2c2fe5c06d633dc0f5af8af61592afbef1b134397e1dc903fb7f6409b534ff — Referee Fund rebate to junk pledges (medium)
+
+Reproduced with the reviewer's proof against a fresh `KeptVault`: a pledge on 1 wei of a
+self-minted token with an already-true `ContractDeployed` milestone is answered kept, and the
+rebate moves the check price from `refereeFund` into the pledge budget, which `withdrawBudget`
+returns to the creator. The fund's balance flows to the Intake's treasury, not to the attacker, but
+it does so for pledges that serve no one.
+
+**Disputed as a proof for this launch; documented rather than changed.** The proof asserts a new
+rebate rule for `KeptVault`, and this launch deploys only `KeptToken` and `KeptHook`. The vault is
+live at `0x3152f9cbf64d0c1ac24ea7e101db3e4d8da86896`, has no upgrade path, and is the brief's fixed
+fourth constructor argument and the fixed destination of `sweep()`. On 2026-10-18 its runtime on
+Robinhood Chain hashed to `0xf9d85b0c…` at 21,509 bytes, the same build this repository recorded
+for `src/KeptVault.sol` when that contract launched (see [docs/VERIFICATION.md](docs/VERIFICATION.md)).
+Editing `src/KeptVault.sol` so the proof passes would make the repository's source diverge from
+the verified bytecode the hook pays into while changing nothing on chain, and pointing `sweep()`
+anywhere else would contradict the brief. The reviewer offered documentation as the other
+resolution. `README.md` and `docs/SPEC.md` now state what the Referee Fund is: a public subsidy
+for oracle checks of any milestone the oracle answers kept, including trivially true pledges on
+worthless tokens, paid at whatever price the vault's Intake quotes. A rebate cap or a value
+threshold belongs to a future vault version, which is the requester's decision, not this launch's.
+
+### aea5e300f4b03cc0fce1e8bf3086b98a9dec6341be898d8264063b806dcae24e — fees custodied under the vault owner's key (low, advisory)
+
+Confirmed by reading `proposeProtocol`/`executeProtocol` and the uncapped rebate in
+`onOracleResult`, and by reading the live vault: `owner()` is `0xd3336a7c8a7d8814c437196abb16c4fe7aa7b016`,
+an account with no code. As the finding says, no code change is required: the hook has no owner,
+but every fee it sweeps is held by the vault, whose owner may replace the Intake, action and
+signer after the seven-day `PROTOCOL_DELAY` and could then rebate the whole fund to its own pledge.
+`README.md`'s hook section now states this trust assumption next to the fee's destination.
+
 ## Changes outside the contracts
 
 | File | Change | Why |
 | --- | --- | --- |
-| `test/KeptHook.t.sol`, `test/helpers/HookFixture.sol` | Ceiling expectations, `_open()`, regression tests for both findings, constructor-order and double-initialize checks | Every change is tested; existing timing tests adapted to the window's new start |
+| `test/KeptHook.t.sol`, `test/helpers/HookFixture.sol` | Ceiling expectations, `_open()`, regression tests for both findings, constructor-order and double-initialize checks; revision: `KeptHookOpeningTest` (1-wei empty and seeded pool) and the fixture's clock assertion keyed on the pool's own IMD movement | Every change is tested; existing timing tests adapted to the window's new start |
 | `test/KeptToken.t.sol` | New | The launch token's supply, transfer, allowance and absence of admin entry points |
 | `test/KeptHookLaunch.t.sol` | New | Rehearses the launch shape locally: empty chain, CREATE2 at a mined `0x20cc` address, exact argument order, no value, runtime size and opcode scan |
-| `test/fork/Robinhood.t.sol` | Hook rehearsal uses the deployed vault and the launch argument order; verifies the vault's IMD; covers late seeding, dust rounding and a permissionless sweep | The brief requires a fork rehearsal on the live PoolManager for this launch |
-| `web/src/abi/KeptHook.json` | Regenerated | New `Initialized` event |
-| `README.md`, `docs/SPEC.md`, `docs/VERIFICATION.md` | This launch's arguments, fee semantics, callbacks, and the current rehearsal record | Required by the brief |
+| `test/fork/Robinhood.t.sol` | Hook rehearsal uses the deployed vault and the launch argument order; verifies the vault's IMD; covers late seeding, dust rounding and a permissionless sweep; revision: a 1-wei swap on the empty pool before seeding | The brief requires a fork rehearsal on the live PoolManager for this launch |
+| `web/src/abi/KeptHook.json` | Regenerated | New `Initialized` event (unchanged by the revision: no ABI change) |
+| `README.md`, `docs/SPEC.md`, `docs/VERIFICATION.md` | This launch's arguments, fee semantics, callbacks, the current rehearsal record; revision: the window's empty-pool rule and the Referee Fund's trust assumptions | Required by the brief; findings fc2c2fe5 and aea5e300 |
 
 ## Validation
 
 `forge build --offline` and `forge test --offline` with
-`FOUNDRY_FUZZ_SEED=0x1cacf04b210f5bc3adc0aa32053cf59f520528175c4bad608c637a003db5baa6`: 153 passed,
-0 failed, 1 skipped (the fork suite, offline). The fork suite passed at Robinhood block 92,017,157;
-see [docs/VERIFICATION.md](docs/VERIFICATION.md).
+`FOUNDRY_FUZZ_SEED=0x1cacf04b210f5bc3adc0aa32053cf59f520528175c4bad608c637a003db5baa6`: 157 passed,
+0 failed, 1 skipped (the fork suite, offline); `forge fmt --check` passes on the changed files. The
+fork suite passed at Robinhood block 92,064,204; see [docs/VERIFICATION.md](docs/VERIFICATION.md).

@@ -241,3 +241,42 @@ contract KeptHookTokenFirstTest is KeptHookTest {
         return false;
     }
 }
+
+/// @dev Finding 277d240e, in its own contract so the main suite stays within via-IR stack limits.
+contract KeptHookOpeningTest is HookFixture {
+    /// @dev Finding 277d240e: a 1-wei exact-input IMD swap is all fee, so the pool fills nothing of
+    /// it. On the empty pool it used to start the opening window anyway; now it is charged (the fee
+    /// rounds up and 1 wei cannot be split) but the window stays closed until a swap moves IMD.
+    function test_oneWeiSwapOnEmptyPoolIsChargedButDoesNotOpenTheWindow() public {
+        router.seed(key, -600, 600, -1e27);
+        router.swap(key, _params(true, true, 1, false));
+        assertEq(hook.collected(), 1, "the wei is still fee");
+        assertEq(hook.openedAt(), 0, "no IMD moved: window stays closed");
+        assertEq(hook.feeNow(), 2000);
+        vm.warp(OPEN + 1800);
+        router.seed(key, -600, 600, 1e27);
+        assertEq(hook.feeNow(), 2000, "first real trade pays 20%");
+        assertEq(_checkedSwap(true, true, 1_000e18, false), 200e18);
+        assertEq(hook.openedAt(), OPEN + 1800);
+        vm.warp(OPEN + 3600);
+        assertEq(hook.feeNow(), 100);
+    }
+
+    /// @dev The same wei on a seeded pool is charged and leaves the window closed too: only a swap
+    /// the pool fills opens it.
+    function test_oneWeiSwapOnSeededPoolDoesNotOpenTheWindowEither() public {
+        vm.warp(OPEN + 100);
+        uint256 charged = _checkedSwap(true, true, 1, false);
+        assertEq(charged, 1, "whole wei is fee");
+        assertEq(hook.openedAt(), 0, "nothing moved through the pool");
+        charged = _checkedSwap(true, true, 2, false);
+        assertEq(charged, 1, "2 wei: one wei of fee, one wei swapped");
+        assertEq(hook.openedAt(), OPEN + 100, "the first filled swap opens the window");
+    }
+}
+
+contract KeptHookOpeningTokenFirstTest is KeptHookOpeningTest {
+    function _imdFirst() internal pure override returns (bool) {
+        return false;
+    }
+}

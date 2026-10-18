@@ -29,6 +29,10 @@ Launch 1 goes first; its address is a constructor argument of `KeptHook`.
 - **Referee Fund**: IMD anyone can donate (the KEPT hook does so continuously). When a
   milestone is verified kept, the fund rebates the price of one check to that pledge's budget.
   Keeping a promise costs nothing; breaking one means the team paid for its own verdict.
+  The rebate is unconditional on what was pledged: any pledge on any ERC-20 whose milestone the
+  oracle answers kept, including one that is already true when it is created, draws it. The fund
+  is therefore a public subsidy for oracle checks of kept milestones, not a reward reserved for
+  the KEPT team or for pledges of any particular value.
 
 ## Milestone templates
 
@@ -130,8 +134,10 @@ for all four templates passed `POST /requests/check` with no blockers, and were 
 - `KeptHook`: immutable fee hook for the single KEPT/IMD pool (LP fee 12500, tick spacing 60).
   It charges a fee on the gross IMD leg of every swap, rounded up: 20% at opening, decaying
   linearly to 1% over 30 minutes (anti-snipe), then 1% forever. The window starts at the first
-  swap that moves IMD, not at pool initialization, so it cannot elapse before the pool holds
-  liquidity. Fees accrue as PoolManager ERC-6909 claims; anyone can call `sweep()`, which redeems
+  swap that moves IMD through the pool, not at pool initialization, so it cannot elapse before
+  the pool holds liquidity; a swap the pool fills nothing of (an empty pool, or 1 wei that is
+  all fee) is charged but does not start it.
+  Fees accrue as PoolManager ERC-6909 claims; anyone can call `sweep()`, which redeems
   them and deposits the IMD into the KEPT Referee Fund. Fee math is adapted from the accepted
   imdDRONE hook (launch 909). Only the launch factory (`$factory`) may initialize the pool, as on
   the live imd.place hook. Permissions `0x20cc`. Constructor: `$poolManager`, IMD, `$token`, the

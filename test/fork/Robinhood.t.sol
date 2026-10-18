@@ -136,20 +136,26 @@ contract RobinhoodForkTest is Test {
         deal(IMD, address(this), 1e24);
         IERC20(IMD).approve(address(router), type(uint256).max);
         kept.approve(address(router), type(uint256).max);
+
+        // Finding 277d240e: a 1-wei IMD swap on the still-empty pool is charged but opens nothing.
+        SwapParams memory buy =
+            SwapParams(imd0, -1, TickMath.getSqrtPriceAtTick(imd0 ? int24(-1200) : int24(1200)));
+        router.swap(key, buy);
+        assertEq(hook.collected(), 1, "the wei is owed as fee");
+        assertEq(hook.openedAt(), 0, "an empty-pool swap does not start the window");
         router.seed(key, -600, 600, 1e24);
 
         // Liquidity seeded later than initialization: the first trade still pays the opening 20%.
         uint256 opening = vm.getBlockTimestamp() + 1800;
         vm.warp(opening);
         assertEq(hook.feeNow(), 2000);
-        SwapParams memory buy =
-            SwapParams(imd0, -1e18, TickMath.getSqrtPriceAtTick(imd0 ? int24(-1200) : int24(1200)));
+        buy.amountSpecified = -1e18;
         router.swap(key, buy);
-        assertEq(hook.collected(), 0.2e18, "opening fee on the IMD input");
+        assertEq(hook.collected(), 0.2e18 + 1, "opening fee on the IMD input");
         assertEq(hook.openedAt(), opening);
-        SwapParams memory dust = SwapParams(buy.zeroForOne, -4, buy.sqrtPriceLimitX96);
-        router.swap(key, dust);
-        assertEq(hook.collected(), 0.2e18 + 1, "dust rounds up to one wei");
+        buy.amountSpecified = -4;
+        router.swap(key, buy);
+        assertEq(hook.collected(), 0.2e18 + 2, "dust rounds up to one wei");
 
         vm.warp(opening + 1800);
         assertEq(hook.feeNow(), 100);
@@ -157,7 +163,7 @@ contract RobinhoodForkTest is Test {
             SwapParams(!imd0, -1e18, TickMath.getSqrtPriceAtTick(imd0 ? int24(1200) : int24(-1200)));
         router.swap(key, sell);
         uint256 fees = hook.collected();
-        assertGt(fees, 0.2e18 + 1, "steady 1% on the IMD output");
+        assertGt(fees, 0.2e18 + 2, "steady 1% on the IMD output");
 
         uint256 fundBefore = KeptVault(DEPLOYED_VAULT).refereeFund();
         uint256 balanceBefore = IERC20(IMD).balanceOf(DEPLOYED_VAULT);

@@ -29,12 +29,25 @@ launch step. See [ADAPTATION.md](ADAPTATION.md) for every change and audit dispo
 - **What**: a fee on the gross IMD leg of every swap in the KEPT/IMD pool, never on KEPT:
   20% at opening, decaying linearly to 1% over 30 minutes, then 1% forever. The fee is
   rounded up, so any swap that moves IMD pays at least one wei.
-- **When the clock starts**: at the first swap that moves IMD, not at pool initialization,
-  so liquidity seeded after initialization still opens at 20%. Until then `feeNow()` is 20%.
+- **When the clock starts**: at the first swap that moves IMD through the pool, not at pool
+  initialization, so liquidity seeded after initialization still opens at 20%. Until then
+  `feeNow()` is 20%. A swap the pool fills nothing of does not start it: on the empty pool, or
+  1 wei of IMD whose whole amount is the rounded-up fee, the fee is still charged but the window
+  stays closed, so nobody can burn the window down before liquidity exists.
 - **Where it goes**: the fee is kept in IMD as PoolManager ERC-6909 claims owned by the hook.
   Anyone can call `sweep()`, which redeems them and deposits the IMD into the vault's Referee
-  Fund (`fundReferee`), which rebates the oracle check of every milestone a team keeps. The
-  brief keeps the fee in IMD; it is not converted to ETH and no ETH is ever held.
+  Fund (`fundReferee`), which rebates the oracle check of every milestone the oracle answers
+  kept. The brief keeps the fee in IMD; it is not converted to ETH and no ETH is ever held.
+- **What the Referee Fund is**: a public subsidy for oracle checks of kept milestones, held by
+  the live `KeptVault`. The rebate is not tied to the pledge's value or the question's
+  difficulty: anyone can create a pledge on 1 wei of any ERC-20 with a milestone that is already
+  true, buy its check, and have the price rebated, so over time the fund pays the oracle for
+  checks of whatever pledges are created, not only genuine KEPT teams'. The fund's only outflow
+  is that rebate, paid at whatever price the vault's Intake quotes. The hook has no owner, but
+  the vault's owner (`0xd3336a7c8a7d8814c437196abb16c4fe7aa7b016`, an externally owned account
+  today) may replace the Intake, action and signer after a public seven-day notice, with no cap
+  on a rebate, so the fees the hook collects are custodied under that key with that notice. See
+  [ADAPTATION.md](ADAPTATION.md) for why this is documented rather than changed.
 - **Callbacks**: `beforeInitialize` (factory-only, single pool, pins the pair, fee and
   spacing), `beforeSwap` + `beforeSwapReturnDelta` (fee on the IMD-specified legs: exact-in buys
   and exact-out sells) and `afterSwap` + `afterSwapReturnDelta` (fee on the IMD-unspecified
@@ -50,7 +63,7 @@ launch step. See [ADAPTATION.md](ADAPTATION.md) for every change and audit dispo
 | --- | --- |
 | `KeptVault` | Holds locked tokens per pledge, buys oracle checks from the IMD Intake, verifies signed verdicts, pays kept tranches and burns broken ones. Open to any project. |
 | `KeptToken` | KEPT, fixed 1,000,000,000 supply, plain ERC-20. |
-| `KeptHook` | Uniswap v4 hook on the KEPT/IMD pool. Takes 1% of the IMD leg (20% at the first trade, decaying over 30 minutes), rounded up, and sweeps it into the vault's Referee Fund, which refunds the check of every milestone a team keeps. |
+| `KeptHook` | Uniswap v4 hook on the KEPT/IMD pool. Takes 1% of the IMD leg (20% at the first filled trade, decaying over 30 minutes), rounded up, and sweeps it into the vault's Referee Fund, which refunds the check of every milestone the oracle answers kept. |
 
 Milestones use four templates so every question the swarm gets is precise:
 `GithubRelease`, `PageContains`, `ContractDeployed`, `ValueAtLeast`.
