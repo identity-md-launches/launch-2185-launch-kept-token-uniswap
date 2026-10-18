@@ -6,23 +6,40 @@ unlock to the team. Broken: they are burned.
 
 Built on the IMD protocol for Robinhood Chain (4663). Every check is paid in IMD to the swarm.
 
-This assignment launches **only `src/KeptVault.sol:KeptVault`** on chain 4663. The token and
-hook below belong to a separate future launch. This launch sends zero ETH and makes no
-initialization calls. Its nonpayable constructor already accepts the factory's static arguments:
+`KeptVault` is live on Robinhood Chain at `0x3152f9cbf64d0c1ac24ea7e101db3e4d8da86896`
+(its launch record is under [docs/launches](docs/launches)). This assignment launches
+**`src/KeptToken.sol:KeptToken` and `src/KeptHook.sol:KeptHook`** through IMD's Uniswap v4 hook
+factory on chain 4663, paired with IMD. The factory deploys both in one transaction, mines the
+hook's CREATE2 address so it carries permission bits `0x20cc`, initializes the KEPT/IMD pool at
+LP fee 12500 and tick spacing 60, and holds the pool's liquidity. Nothing here is deployed,
+signed or broadcast by this repository.
 
-| Argument, in order | Value |
+| Contract | Constructor arguments, in order |
 | --- | --- |
-| `owner_` (`address`) | `$owner`, resolving to `0xd3336a7c8a7d8814c437196abb16c4fe7aa7b016` |
-| `intake_` (`address`) | `0x1397434cd35e8a9c8ac312a61d3a285eb31dea56` (Intake v1) |
-| `imd_` (`address`) | `0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127` |
-| `action_` (`bytes32`) | `0x6f7261636c652e72657175657374406f7261636c652d31000000000000000000` |
-| `signer_` (`address`) | `0x5598aa9146215bc13eb26f2c692ad1461fd32982` |
-| `panelSize_` (`uint16`) | `9` |
-| `quorum_` (`uint16`) | `7` |
+| `KeptToken` | none; mints 1,000,000,000 KEPT (10^27 minor units) to its deployer, the factory |
+| `KeptHook` | `$poolManager` (`IPoolManager`); IMD `0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127`; `$token`; KeptVault `0x3152f9cbf64d0c1ac24ea7e101db3e4d8da86896`; `$factory` |
 
-The deployment handoff supplies the deployed address. The manifest belongs to the following
-launch step. See [ADAPTATION.md](ADAPTATION.md) for audit dispositions and
+The hook has no owner, proxy or upgrade path, so no `$owner` argument exists. `$factory` is used
+for one thing: only that account may initialize the pool. The manifest belongs to the following
+launch step. See [ADAPTATION.md](ADAPTATION.md) for every change and audit disposition and
 [docs/VERIFICATION.md](docs/VERIFICATION.md) for checks and the fork rehearsal.
+
+### The hook's fee
+
+- **What**: a fee on the gross IMD leg of every swap in the KEPT/IMD pool, never on KEPT:
+  20% at opening, decaying linearly to 1% over 30 minutes, then 1% forever. The fee is
+  rounded up, so any swap that moves IMD pays at least one wei.
+- **When the clock starts**: at the first swap that moves IMD, not at pool initialization,
+  so liquidity seeded after initialization still opens at 20%. Until then `feeNow()` is 20%.
+- **Where it goes**: the fee is kept in IMD as PoolManager ERC-6909 claims owned by the hook.
+  Anyone can call `sweep()`, which redeems them and deposits the IMD into the vault's Referee
+  Fund (`fundReferee`), which rebates the oracle check of every milestone a team keeps. The
+  brief keeps the fee in IMD; it is not converted to ETH and no ETH is ever held.
+- **Callbacks**: `beforeInitialize` (factory-only, single pool, pins the pair, fee and
+  spacing), `beforeSwap` + `beforeSwapReturnDelta` (fee on the IMD-specified legs: exact-in buys
+  and exact-out sells) and `afterSwap` + `afterSwapReturnDelta` (fee on the IMD-unspecified
+  legs: exact-out buys and exact-in sells). All five were in the brief; none were added.
+- **The LP fee** stays the static 12500 (1.25%); the hook never overrides it.
 
 - Full design: [docs/SPEC.md](docs/SPEC.md)
 - Protocol research and addresses: [docs/research.md](docs/research.md)
@@ -33,7 +50,7 @@ launch step. See [ADAPTATION.md](ADAPTATION.md) for audit dispositions and
 | --- | --- |
 | `KeptVault` | Holds locked tokens per pledge, buys oracle checks from the IMD Intake, verifies signed verdicts, pays kept tranches and burns broken ones. Open to any project. |
 | `KeptToken` | KEPT, fixed 1,000,000,000 supply, plain ERC-20. |
-| `KeptHook` | Uniswap v4 hook on the KEPT/IMD pool. Takes 1% of the IMD leg (20% at opening, decaying over 30 minutes) and sweeps it into the vault's Referee Fund, which refunds the check of every milestone a team keeps. |
+| `KeptHook` | Uniswap v4 hook on the KEPT/IMD pool. Takes 1% of the IMD leg (20% at the first trade, decaying over 30 minutes), rounded up, and sweeps it into the vault's Referee Fund, which refunds the check of every milestone a team keeps. |
 
 Milestones use four templates so every question the swarm gets is precise:
 `GithubRelease`, `PageContains`, `ContractDeployed`, `ValueAtLeast`.
@@ -85,9 +102,15 @@ forge test
 ```
 
 The suite covers the full pledge lifecycle, every callback guard, the IMD oracle
-conformance vector (KEPT verifies the protocol's real signature), the hook's exact fee in all
-four swap modes on a real local PoolManager in both currency orders, and stateful invariants
-proving locked tokens and IMD are always accounted for.
+conformance vector (KEPT verifies the protocol's real signature), the hook's exact rounded-up fee
+in all four swap modes on a real local PoolManager in both currency orders, the opening window
+and dust cases, the launch token's supply and transfers, a local rehearsal of the launch shape
+(empty chain, CREATE2 at a mined `0x20cc` address, opcode scan), and stateful invariants proving
+locked tokens and IMD are always accounted for. The Robinhood fork suite is opt-in:
+
+```sh
+forge test --match-contract RobinhoodForkTest --fork-url https://rpc.mainnet.chain.robinhood.com
+```
 
 ## Provenance
 

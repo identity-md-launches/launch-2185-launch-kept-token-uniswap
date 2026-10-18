@@ -27,6 +27,8 @@ contract RobinhoodForkTest is Test {
     address constant IMD = 0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127;
     address constant MANAGER = 0x8366a39CC670B4001A1121B8F6A443A643e40951;
     address constant SIGNER = 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982;
+    /// @dev The KeptVault IMD launched on Robinhood Chain: the hook's fourth constructor argument.
+    address constant DEPLOYED_VAULT = 0x3152f9cbF64D0C1AC24EA7E101dB3E4d8da86896;
     bytes32 constant ACTION = 0x6f7261636c652e72657175657374406f7261636c652d31000000000000000000;
     bytes32 constant REQUESTED =
         keccak256("Requested(bytes32,address,bytes32,bytes,address,bytes4,address,uint256)");
@@ -43,11 +45,16 @@ contract RobinhoodForkTest is Test {
         assertGt(INTAKE.code.length, 0, "live Intake code");
         assertGt(IMD.code.length, 0, "live IMD code");
         assertGt(MANAGER.code.length, 0, "live PoolManager code");
+        assertGt(DEPLOYED_VAULT.code.length, 0, "live KeptVault code");
         assertEq(IERC20Metadata(IMD).symbol(), "IMD");
         assertEq(IERC20Metadata(IMD).decimals(), 18);
+        assertEq(address(KeptVault(DEPLOYED_VAULT).imd()), IMD, "deployed vault pulls the launch's IMD");
+        assertEq(KeptVault(DEPLOYED_VAULT).owner(), OWNER);
         vault = new KeptVault(OWNER, INTAKE, IMD, ACTION, SIGNER, 9, 7);
         assertEq(vault.owner(), OWNER);
         kept = new KeptToken();
+        assertEq(kept.totalSupply(), 1e27);
+        assertEq(kept.balanceOf(address(this)), 1e27);
     }
 
     /// @notice A KEPT check is a real, paid Intake request whose event carries KEPT's exact body.
@@ -95,15 +102,22 @@ contract RobinhoodForkTest is Test {
         assertTrue(seen, "Intake emitted Requested for the KEPT check");
     }
 
-    /// @notice The hook trades and sweeps on Robinhood's real PoolManager with real IMD.
+    /// @notice The launch's hook, with its constructor arguments in launch order ($poolManager, IMD,
+    /// $token, the deployed KeptVault, $factory), trades on Robinhood's real PoolManager with real
+    /// IMD and sweeps into the deployed vault's Referee Fund. This test stands in for the factory.
     function test_hookTradesAndFundsTheRefereeOnTheLivePoolManager() public {
         address at = address(uint160(0x4b4550540000000000000000000000000000) << 14 | HookFlags.KEPT);
         deployCodeTo(
             "KeptHook.sol:KeptHook",
-            abi.encode(MANAGER, IMD, address(kept), address(vault), address(this)),
+            abi.encode(MANAGER, IMD, address(kept), DEPLOYED_VAULT, address(this)),
             at
         );
         KeptHook hook = KeptHook(at);
+        assertEq(address(hook.poolManager()), MANAGER);
+        assertEq(Currency.unwrap(hook.imd()), IMD);
+        assertEq(hook.token(), address(kept));
+        assertEq(hook.vault(), DEPLOYED_VAULT);
+        assertEq(hook.factory(), address(this));
         bool imd0 = IMD < address(kept);
         PoolKey memory key = PoolKey(
             Currency.wrap(imd0 ? IMD : address(kept)),
@@ -112,24 +126,45 @@ contract RobinhoodForkTest is Test {
             60,
             IHooks(at)
         );
+        vm.prank(team);
+        vm.expectRevert();
         IPoolManager(MANAGER).initialize(key, TickMath.getSqrtPriceAtTick(0));
+        IPoolManager(MANAGER).initialize(key, TickMath.getSqrtPriceAtTick(0));
+        assertTrue(hook.initialized());
+        assertEq(hook.openedAt(), 0, "initialization does not start the window");
         TestRouter router = new TestRouter(IPoolManager(MANAGER));
         deal(IMD, address(this), 1e24);
         IERC20(IMD).approve(address(router), type(uint256).max);
         kept.approve(address(router), type(uint256).max);
         router.seed(key, -600, 600, 1e24);
 
-        vm.warp(block.timestamp + 1800);
+        // Liquidity seeded later than initialization: the first trade still pays the opening 20%.
+        uint256 opening = vm.getBlockTimestamp() + 1800;
+        vm.warp(opening);
+        assertEq(hook.feeNow(), 2000);
         SwapParams memory buy =
             SwapParams(imd0, -1e18, TickMath.getSqrtPriceAtTick(imd0 ? int24(-1200) : int24(1200)));
         router.swap(key, buy);
+        assertEq(hook.collected(), 0.2e18, "opening fee on the IMD input");
+        assertEq(hook.openedAt(), opening);
+        SwapParams memory dust = SwapParams(buy.zeroForOne, -4, buy.sqrtPriceLimitX96);
+        router.swap(key, dust);
+        assertEq(hook.collected(), 0.2e18 + 1, "dust rounds up to one wei");
+
+        vm.warp(opening + 1800);
+        assertEq(hook.feeNow(), 100);
         SwapParams memory sell =
             SwapParams(!imd0, -1e18, TickMath.getSqrtPriceAtTick(imd0 ? int24(1200) : int24(-1200)));
         router.swap(key, sell);
         uint256 fees = hook.collected();
-        assertGt(fees, 0);
-        assertEq(hook.sweep(), fees);
-        assertEq(vault.refereeFund(), fees);
-        assertEq(IERC20(IMD).balanceOf(address(vault)), fees);
+        assertGt(fees, 0.2e18 + 1, "steady 1% on the IMD output");
+
+        uint256 fundBefore = KeptVault(DEPLOYED_VAULT).refereeFund();
+        uint256 balanceBefore = IERC20(IMD).balanceOf(DEPLOYED_VAULT);
+        vm.prank(team);
+        assertEq(hook.sweep(), fees, "anyone can sweep");
+        assertEq(KeptVault(DEPLOYED_VAULT).refereeFund() - fundBefore, fees);
+        assertEq(IERC20(IMD).balanceOf(DEPLOYED_VAULT) - balanceBefore, fees);
+        assertEq(hook.pending(), 0);
     }
 }

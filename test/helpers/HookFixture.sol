@@ -89,6 +89,19 @@ abstract contract HookFixture is Test {
         kept.approve(address(router), type(uint256).max);
     }
 
+    /// @dev ceil(gross * rate / 10_000): the fee the hook owes on a gross IMD amount.
+    function _ceilFee(uint256 gross, uint256 rate) internal pure returns (uint256) {
+        return (gross * rate + 9_999) / 10_000;
+    }
+
+    /// @dev Opens the window at OPEN with the first fee-bearing swap, as the launch's first trade does.
+    function _open() internal returns (uint256 charged) {
+        vm.warp(OPEN);
+        assertEq(hook.openedAt(), 0, "clock not started");
+        charged = _checkedSwap(true, true, 1e18, false);
+        assertEq(hook.openedAt(), OPEN, "clock starts at the first swap");
+    }
+
     function _params(bool buy, bool exactIn, uint256 amount, bool limited)
         internal
         view
@@ -126,11 +139,14 @@ abstract contract HookFixture is Test {
         assertEq(netKept, rawKept, "KEPT is never charged");
         assertEq(netIMD, rawIMD - int256(charged), "only the IMD delta changes");
         uint256 gross = buy ? uint256(-netIMD) : uint256(rawIMD);
-        assertEq(charged, gross * hook.feeNow() / 10_000, "exact scheduled fee on actual gross IMD");
+        assertEq(charged, _ceilFee(gross, hook.feeNow()), "exact scheduled fee on actual gross IMD");
+        assertLe(charged, gross, "fee never exceeds the IMD leg");
+        if (gross != 0) assertGt(charged, 0, "any IMD leg pays at least one wei");
         assertEq(hook.pending(), beforePending + charged, "claim conservation");
         assertEq(int256(imd.balanceOf(address(this))) - int256(beforeIMD), netIMD);
         assertEq(int256(kept.balanceOf(address(this))) - int256(beforeKept), netKept);
-        assertLe(charged, gross * hook.OPENING_FEE() / 10_000);
+        assertLe(charged, _ceilFee(gross, hook.OPENING_FEE()));
+        if (charged != 0) assertGt(hook.openedAt(), 0, "a charged swap starts the clock");
         if (exactIn) assertLe(uint256(-(buy ? netIMD : netKept)), amount);
         else assertLe(uint256(buy ? netKept : netIMD), amount);
         if (!limited && amount <= 1e22) {

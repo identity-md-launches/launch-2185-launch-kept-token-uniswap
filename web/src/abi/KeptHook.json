@@ -589,6 +589,12 @@
  },
  {
   "type": "event",
+  "name": "Initialized",
+  "inputs": [],
+  "anonymous": false
+ },
+ {
+  "type": "event",
   "name": "Opened",
   "inputs": [
    {
