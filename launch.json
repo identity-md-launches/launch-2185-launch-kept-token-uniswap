@@ -1,0 +1,33 @@
+{
+  "kind": "univ4_hook",
+  "hook": {
+    "contract": "KeptHook",
+    "constructorArgs": [
+      "$poolManager",
+      "0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127",
+      "$token",
+      "0x3152f9cbf64d0c1ac24ea7e101db3e4d8da86896",
+      "$factory"
+    ],
+    "permissions": [
+      "beforeInitialize",
+      "beforeSwap",
+      "afterSwap",
+      "beforeSwapReturnDelta",
+      "afterSwapReturnDelta"
+    ]
+  },
+  "token": {
+    "contract": "KeptToken",
+    "name": "KEPT",
+    "symbol": "KEPT",
+    "decimals": 18
+  },
+  "pool": {
+    "pairedCurrency": "0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "KeptToken (src/KeptToken.sol) is a fixed-supply ERC-20: name KEPT, symbol KEPT, 18 decimals, 1,000,000,000 tokens minted once to its deployer in the constructor, no constructor arguments, no owner, mint, burn, tax or pause. KeptHook (src/KeptHook.sol) constructor, in declaration order: IPoolManager manager_ ($poolManager), address imd_ (IMD on Robinhood Chain, 0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127), address token_ ($token), address vault_ (the deployed KeptVault, 0x3152f9cbf64d0c1ac24ea7e101db3e4d8da86896, the Referee Fund that receives every fee), address factory_ ($factory). The constructor rejects a zero address and imd_ == token_, and validates its own address against getHookPermissions, so it must be CREATE2-mined to flags 0x20cc: beforeInitialize, beforeSwap, afterSwap, beforeSwapReturnDelta, afterSwapReturnDelta. The hook has no owner, no admin, no proxy and no upgrade path; its only state is openedAt, collected, initialized and a reentrancy flag. beforeInitialize is restricted to the PoolManager as caller and accepts exactly one pool: sender must be the launch factory, the currencies must be KEPT and IMD in either order, key.fee must be 12500 (the constant LP_FEE), key.tickSpacing must be 60, key.hooks must be this hook; a second initialization reverts. The LP fee is the static 12500 tier listed by the launch policy; the hook does not use the dynamic-fee flag. On every swap the hook charges a fee on the IMD leg only, in beforeSwap (when IMD is the specified currency) or afterSwap (when IMD is the unspecified currency), as ceil(gross IMD * feeNow / 10,000): 20% at the first IMD-moving swap, decaying linearly to 1% over 1,800 seconds from that swap, then 1% forever. The fee is minted to the hook as PoolManager ERC-6909 claims on IMD, so swappers never need IMD on hand beyond the swap itself. sweep() is permissionless: it burns the claims, takes the IMD and deposits it into the KeptVault Referee Fund via fundReferee; it is a no-op while the PoolManager is unlocked. pool.initialPrice is the one-to-one value the launch facts give; the deployer derives the opening price from the policy's opening market cap and the token's address. Offline: forge build and forge test (153 passed, 0 failed, 1 skipped fork suite) with FOUNDRY_FUZZ_SEED=0x1cacf04b210f5bc3adc0aa32053cf59f520528175c4bad608c637a003db5baa6. docs/VERIFICATION.md records the Robinhood fork rehearsal of this hook on the live PoolManager 0x8366a39cc670b4001a1121b8f6a443a643e40951 at block 92,017,157: initialize, liquidity, four swaps and sweep into the live KeptVault."
+}
