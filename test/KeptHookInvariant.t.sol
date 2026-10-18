@@ -44,6 +44,8 @@ contract KeptHookHandler is Test {
     uint256 public ghostLastFee;
     uint256 public swaps;
     uint256 public chargedSwaps;
+    uint256 public movedSwaps;
+    uint256 public dustCharged;
     uint256 public sweeps;
     uint256 public deferredSweeps;
     // Per-call property violations; every one must stay zero.
@@ -96,8 +98,17 @@ contract KeptHookHandler is Test {
     }
 
     function swap(uint256 actorSeed, bool buy, bool exactIn, uint256 amount, bool limited) external {
+        _swap(actorSeed, buy, exactIn, bound(amount, 1, 5e24), limited);
+    }
+
+    /// @dev A 1-wei exact-input trade: on the IMD side the whole wei is fee and the pool fills
+    /// nothing, so it is charged but must not open the window.
+    function dustSwap(uint256 actorSeed, bool buy, bool limited) external {
+        _swap(actorSeed, buy, true, 1, limited);
+    }
+
+    function _swap(uint256 actorSeed, bool buy, bool exactIn, uint256 amount, bool limited) internal {
         address actor = actors[actorSeed % actors.length];
-        amount = bound(amount, 1, 5e24);
         SwapParams memory p;
         p.zeroForOne = buy == imd0;
         p.amountSpecified = exactIn ? -int256(amount) : int256(amount);
@@ -138,6 +149,11 @@ contract KeptHookHandler is Test {
             if (charged != 0) {
                 ++chargedSwaps;
                 ghostCharged += charged;
+                if (rawIMD == 0) ++dustCharged;
+            }
+            // Only a swap that moved IMD through the pool opens the window.
+            if (rawIMD != 0) {
+                ++movedSwaps;
                 if (ghostOpenedAt == 0) ghostOpenedAt = block.timestamp;
             }
         } catch {
@@ -234,7 +250,7 @@ contract KeptHookInvariantTest is HookFixture {
         kept.transfer(address(handler), kept.balanceOf(address(this)) / 2);
         imd.transfer(address(handler), 1e27);
         targetContract(address(handler));
-        bytes4[] memory selectors = new bytes4[](8);
+        bytes4[] memory selectors = new bytes4[](9);
         selectors[0] = KeptHookHandler.swap.selector;
         selectors[1] = KeptHookHandler.swap.selector;
         selectors[2] = KeptHookHandler.swap.selector;
@@ -243,6 +259,7 @@ contract KeptHookInvariantTest is HookFixture {
         selectors[5] = KeptHookHandler.donate.selector;
         selectors[6] = KeptHookHandler.wait.selector;
         selectors[7] = KeptHookHandler.liquidity.selector;
+        selectors[8] = KeptHookHandler.dustSwap.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -284,8 +301,9 @@ contract KeptHookInvariantTest is HookFixture {
     function invariant_clockOpensOnceAndFeeNeverRises() public view {
         assertEq(handler.clockRestarts(), 0, "openedAt changed after it was set");
         assertEq(handler.feeIncreases(), 0, "feeNow rose over time");
-        assertEq(hook.openedAt(), handler.ghostOpenedAt(), "the clock opened at the first charged swap");
-        assertEq(hook.openedAt() == 0, handler.ghostCharged() == 0, "open iff a fee was ever charged");
+        assertEq(hook.openedAt(), handler.ghostOpenedAt(), "the clock opened at the first swap that moved IMD");
+        assertEq(hook.openedAt() == 0, handler.movedSwaps() == 0, "open iff a swap ever moved IMD");
+        if (hook.openedAt() == 0) assertEq(hook.feeNow(), hook.OPENING_FEE(), "closed window charges 20%");
         uint256 fee = hook.feeNow();
         assertGe(fee, hook.REFEREE_FEE());
         assertLe(fee, hook.OPENING_FEE());
@@ -308,6 +326,22 @@ contract KeptHookInvariantTest is HookFixture {
             manager.balanceOf(address(hook), hook.imd().toId()),
             "the manager holds the IMD behind the hook's claims"
         );
+    }
+
+    /// @dev The dust path the clock invariant depends on is reachable from the handler: a 1-wei buy is
+    /// charged its whole wei, moves nothing, and leaves the window closed until a filled trade.
+    function test_handlerDustBuyIsChargedWithoutOpening() public {
+        vm.warp(OPEN + 50);
+        handler.dustSwap(0, true, false);
+        assertEq(handler.dustCharged(), 1, "the wei was charged");
+        assertEq(handler.movedSwaps(), 0);
+        assertEq(hook.collected(), 1);
+        assertEq(hook.openedAt(), 0, "window stays closed");
+        handler.swap(1, true, true, 1_000e18, false);
+        assertEq(handler.movedSwaps(), 1);
+        assertEq(hook.openedAt(), OPEN + 50, "the first filled trade opens it");
+        assertEq(handler.feeMismatches(), 0);
+        assertEq(handler.clockRestarts(), 0);
     }
 
     /// @dev Guards against a vacuous run: the sequences must actually trade and be charged.
